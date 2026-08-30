@@ -12,10 +12,10 @@ provider "aws" {
 }
 
 resource "aws_s3_bucket" "first_bucket" {
-  bucket = "merter-ilk-terraform-bucket-2026"  # global olarak benzersiz olmalı, kendi isminizi ekleyin
+  bucket = "merter-first-terraform-bucket-2026"
 
   tags = {
     Environment = "Learning"
-    Project     = "Terraform-First-Steps"
+    Project     = "terraform-first-steps"
   }
 }
