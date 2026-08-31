@@ -61,3 +61,14 @@ resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
+
+# Second private subnet - required by AWS for RDS (needs at least 2 AZs for high availability)
+resource "aws_subnet" "private_2" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.3.0/24"
+  availability_zone = "eu-central-1b"
+
+  tags = {
+    Name = "ecommerce-private-subnet-2"
+  }
+}

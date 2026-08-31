@@ -15,3 +15,15 @@ variable "bucket_name" {
   type        = string
   default     = "merter-first-terraform-bucket-2026"
 }
+
+variable "db_username" {
+  description = "Master username for the RDS database"
+  type        = string
+  default     = "ecommerce_admin"
+}
+
+variable "db_password" {
+  description = "Master password for the RDS database"
+  type        = string
+  sensitive   = true
+}
