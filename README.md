@@ -23,8 +23,8 @@ terraform apply
 ## Progress
 - [x] AWS provider setup
 - [x] First S3 bucket resource (refactored with variables)
-- [ ] VPC and networking layer
-- [ ] RDS database
+- [X] VPC and networking layer
+- [X] RDS database
 - [ ] Application deployment via ECS/Kubernetes
 - [ ] Security scanning (Checkov/tfsec) in CI/CD
 
