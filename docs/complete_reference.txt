@@ -1,0 +1,518 @@
+# ecommerce-infra-as-code — Complete Project Reference
+
+Status: COMPLETED (Phase 1-3) — All AWS resources destroyed, code preserved for reuse.
+Repository: github.com/merterakinci/ecommerce-infra-as-code
+
+================================================================================
+1. PROJECT STRUCTURE
+================================================================================
+
+ecommerce-infra-as-code/
+├── main.tf                  # Provider config + S3 bucket + versioning + lifecycle
+├── network.tf                # VPC, subnets, Internet Gateway, route table
+├── security_groups.tf        # Web server and database security groups
+├── database.tf               # RDS PostgreSQL instance + DB subnet group
+├── variables.tf               # Input variables
+├── outputs.tf                 # Output values
+├── terraform.tfvars           # Real secret values (NOT committed to Git)
+├── .gitignore                  # Excludes state files, cache, secrets
+├── README.md                   # Documentation
+└── docs/
+    └── ecommerce-infra-as-code_final_summary.pdf
+
+================================================================================
+2. FULL FILE CONTENTS
+================================================================================
+
+--------------------------------------------------------------------------------
+main.tf
+--------------------------------------------------------------------------------
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+resource "aws_s3_bucket" "first_bucket" {
+  bucket = var.bucket_name
+
+  tags = {
+    Environment = var.environment
+    Project     = "terraform-first-steps"
+    ManagedBy   = "terraform"
+  }
+}
+
+# Enable versioning on the S3 bucket to protect against accidental deletion or overwrite
+resource "aws_s3_bucket_versioning" "first_bucket_versioning" {
+  bucket = aws_s3_bucket.first_bucket.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Lifecycle policy: keep only 1 old (noncurrent) version, delete anything older automatically
+resource "aws_s3_bucket_lifecycle_configuration" "first_bucket_lifecycle" {
+  bucket = aws_s3_bucket.first_bucket.id
+
+  rule {
+    id     = "limit-noncurrent-versions"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days           = 1
+      newer_noncurrent_versions = 1
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.first_bucket_versioning]
+}
+
+--------------------------------------------------------------------------------
+variables.tf
+--------------------------------------------------------------------------------
+variable "aws_region" {
+  description = "AWS region where resources will be created"
+  type        = string
+  default     = "eu-central-1"
+}
+
+variable "environment" {
+  description = "Deployment environment (e.g. learning, dev, staging, prod)"
+  type        = string
+  default     = "learning"
+}
+
+variable "bucket_name" {
+  description = "Globally unique name for the S3 bucket"
+  type        = string
+  default     = "merter-first-terraform-bucket-2026"
+}
+
+variable "db_username" {
+  description = "Master username for the RDS database"
+  type        = string
+  default     = "ecommerce_admin"
+}
+
+variable "db_password" {
+  description = "Master password for the RDS database"
+  type        = string
+  sensitive   = true
+}
+
+--------------------------------------------------------------------------------
+outputs.tf
+--------------------------------------------------------------------------------
+output "bucket_name" {
+  description = "Name of the created S3 bucket"
+  value       = aws_s3_bucket.first_bucket.id
+}
+
+output "bucket_arn" {
+  description = "ARN of the created S3 bucket"
+  value       = aws_s3_bucket.first_bucket.arn
+}
+
+--------------------------------------------------------------------------------
+network.tf
+--------------------------------------------------------------------------------
+# The VPC itself - our isolated virtual network
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name        = "ecommerce-vpc"
+    Environment = var.environment
+  }
+}
+
+# Public subnet - for resources that need internet access (e.g. load balancer)
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "eu-central-1a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "ecommerce-public-subnet"
+  }
+}
+
+# Private subnet - for resources that should NOT be reachable from the internet
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "eu-central-1a"
+
+  tags = {
+    Name = "ecommerce-private-subnet"
+  }
+}
+
+# Second private subnet - required by AWS for RDS (needs at least 2 AZs)
+resource "aws_subnet" "private_2" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.3.0/24"
+  availability_zone = "eu-central-1b"
+
+  tags = {
+    Name = "ecommerce-private-subnet-2"
+  }
+}
+
+# Internet Gateway - allows the VPC to communicate with the internet
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "ecommerce-igw"
+  }
+}
+
+# Route table for the public subnet - directs internet-bound traffic to the gateway
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "ecommerce-public-rt"
+  }
+}
+
+# Associate the public subnet with the public route table
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+--------------------------------------------------------------------------------
+security_groups.tf
+--------------------------------------------------------------------------------
+# Security Group for the web server (public-facing)
+resource "aws_security_group" "web_server" {
+  name        = "ecommerce-web-server-sg"
+  description = "Allow HTTP/HTTPS traffic from the internet"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "Allow HTTPS from anywhere"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Allow HTTP from anywhere (redirect to HTTPS in production)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ecommerce-web-server-sg"
+  }
+}
+
+# Security Group for the database (private, restricted access)
+resource "aws_security_group" "database" {
+  name        = "ecommerce-database-sg"
+  description = "Allow database traffic only from the web server"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "Allow PostgreSQL traffic only from web server security group"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.web_server.id]
+  }
+
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ecommerce-database-sg"
+  }
+}
+
+--------------------------------------------------------------------------------
+database.tf
+--------------------------------------------------------------------------------
+# Groups the private subnets together so RDS knows where it's allowed to live
+resource "aws_db_subnet_group" "main" {
+  name       = "ecommerce-db-subnet-group"
+  subnet_ids = [aws_subnet.private.id, aws_subnet.private_2.id]
+
+  tags = {
+    Name = "ecommerce-db-subnet-group"
+  }
+}
+
+# The actual PostgreSQL database instance
+resource "aws_db_instance" "ecommerce_db" {
+  identifier             = "ecommerce-db"
+  engine                 = "postgres"
+  engine_version         = "16.15"
+  instance_class         = "db.t3.micro"       # Free Tier eligible
+  allocated_storage      = 20                   # GB - Free Tier covers up to 20GB
+  storage_type           = "gp2"
+
+  db_name                = "ecommerce"
+  username               = var.db_username
+  password               = var.db_password
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.database.id]
+
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  multi_az               = false
+
+  tags = {
+    Name = "ecommerce-db"
+  }
+}
+
+--------------------------------------------------------------------------------
+.gitignore
+--------------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+terraform.tfvars
+
+--------------------------------------------------------------------------------
+terraform.tfvars  (LOCAL ONLY — never committed to Git)
+--------------------------------------------------------------------------------
+db_password = "<your-generated-password>"
+
+================================================================================
+3. ALL AWS RESOURCES CREATED (9 total, all destroyed at project end)
+================================================================================
+
+Resource Type                        | Terraform Name                          | AWS Name
+--------------------------------------|------------------------------------------|-------------------------------
+aws_s3_bucket                          | first_bucket                             | merter-first-terraform-bucket-2026
+aws_s3_bucket_versioning               | first_bucket_versioning                  | (attached to bucket above)
+aws_s3_bucket_lifecycle_configuration | first_bucket_lifecycle                   | (attached to bucket above)
+aws_vpc                                | main                                     | ecommerce-vpc
+aws_subnet                             | public                                   | ecommerce-public-subnet
+aws_subnet                             | private                                  | ecommerce-private-subnet
+aws_subnet                             | private_2                                | ecommerce-private-subnet-2
+aws_internet_gateway                   | main                                     | ecommerce-igw
+aws_route_table                        | public                                   | ecommerce-public-rt
+aws_route_table_association            | public                                   | (association, no separate name)
+aws_security_group                     | web_server                               | ecommerce-web-server-sg
+aws_security_group                     | database                                 | ecommerce-database-sg
+aws_db_subnet_group                    | main                                     | ecommerce-db-subnet-group
+aws_db_instance                        | ecommerce_db                             | ecommerce-db
+
+(14 resources total at final state — matches "Destroy complete! Resources: 14 destroyed.")
+
+================================================================================
+4. ALL TERRAFORM COMMANDS USED (in order, with purpose)
+================================================================================
+
+terraform init
+    → Downloads the AWS provider plugin, prepares the working directory.
+    → Run once per project, or after adding new providers.
+
+terraform plan
+    → Shows what WILL happen (create/change/destroy) WITHOUT making changes.
+    → Always run before apply to review changes.
+
+terraform apply
+    → Actually creates/modifies/destroys resources in AWS.
+    → Prompts for "yes" confirmation before proceeding.
+
+terraform destroy
+    → Removes ALL resources tracked in the current state file.
+    → Used at the end of the project to avoid ongoing AWS costs.
+
+terraform show
+    → Displays the current state in human-readable format.
+
+terraform state show <resource_address>
+    → Shows details of a single resource from the state file.
+    → Example: terraform state show aws_vpc.main
+
+terraform output
+    → Displays the values defined in outputs.tf after a successful apply.
+
+================================================================================
+5. ALL AWS CLI COMMANDS USED
+================================================================================
+
+aws configure
+    → Sets up local credentials (Access Key, Secret Key, region, output format).
+
+aws sts get-caller-identity
+    → Verifies which AWS identity the CLI is currently authenticated as.
+
+aws s3 ls
+    → Lists all S3 buckets in the account (used to verify bucket deletion).
+
+aws rds describe-db-engine-versions --engine postgres --region eu-central-1 \
+    --query "DBEngineVersions[].EngineVersion" --output table
+    → Lists available PostgreSQL versions in a region (used to fix an invalid
+      engine_version error).
+
+aws rds describe-db-instances --db-instance-identifier ecommerce-db \
+    --query "DBInstances[0].PubliclyAccessible"
+    → Verifies that the RDS instance is NOT publicly accessible.
+
+================================================================================
+6. ALL GIT / GITHUB COMMANDS USED
+================================================================================
+
+git config --global user.name "Merter Akinci"
+git config --global user.email "merterakinci@gmail.com"
+    → One-time identity setup for commits.
+
+git init
+    → Initializes a new local Git repository.
+
+git add <files>
+    → Stages files for the next commit.
+
+git commit -m "message"
+    → Saves a snapshot of staged changes locally.
+
+git remote add origin <url>
+    → Links the local repo to a GitHub repository.
+
+git branch -M main
+    → Renames the current branch to "main".
+
+git push -u origin main
+    → Uploads local commits to GitHub, sets tracking for future pushes.
+
+git push --force
+    → Overwrites remote history (used after rebase). Only safe on solo projects.
+
+git status
+    → Shows what's staged, unstaged, or untracked.
+
+git log --oneline
+    → Shows commit history in compact form.
+
+git rebase -i --root
+    → Interactive rebase from the very first commit (used to reword a commit
+      message from Turkish to English).
+
+git rebase --abort
+    → Cancels an in-progress rebase, restores previous state safely.
+
+git config --global core.editor "nano"
+    → Sets nano as the default editor for Git operations (easier than vim
+      for beginners).
+
+================================================================================
+7. KEY CONCEPTS LEARNED (Reference Glossary)
+================================================================================
+
+IAM (Identity and Access Management)
+    AWS service for managing users, permissions, and access control.
+    Best practice: never use the root account for daily operations.
+
+Least Privilege
+    Security principle: grant only the minimum permissions needed.
+
+VPC (Virtual Private Cloud)
+    An isolated virtual network within AWS where you control IP ranges,
+    subnets, routing, and security.
+
+CIDR Block
+    The IP address range notation for a network (e.g. 10.0.0.0/16).
+
+Subnet
+    A subdivision of a VPC's IP range. Public subnets can reach the internet
+    directly; private subnets cannot (unless routed through a NAT Gateway).
+
+Internet Gateway
+    Connects a VPC to the public internet.
+
+Route Table
+    Defines where network traffic is directed (e.g. "0.0.0.0/0" → internet).
+
+Security Group
+    A virtual firewall attached to resources, controlling inbound/outbound
+    traffic by port, protocol, and source (IP range or another security group).
+
+RDS (Relational Database Service)
+    AWS's managed database service (handles patching, backups, scaling).
+
+ARN (Amazon Resource Name)
+    A globally unique identifier for any AWS resource.
+    Format: arn:partition:service:region:account-id:resource
+
+Terraform State
+    A file (terraform.tfstate) that tracks what Terraform has created,
+    used to calculate what needs to change on the next apply.
+
+Terraform Provider
+    A plugin that lets Terraform communicate with a specific platform
+    (e.g. the AWS provider).
+
+sensitive = true
+    A variable attribute that hides its value in Terraform's CLI output.
+
+Personal Access Token (PAT)
+    A token used instead of a password for GitHub authentication over HTTPS.
+
+Credential Rotation
+    The practice of invalidating and replacing exposed or expired credentials
+    immediately after discovery.
+
+S3 Versioning
+    Keeps multiple versions of an object in a bucket, protecting against
+    accidental overwrite or deletion.
+
+S3 Lifecycle Policy
+    Automates the transition or deletion of objects/versions after a set
+    period, controlling storage costs.
+
+================================================================================
+8. FINAL PROJECT STATE
+================================================================================
+
+- All 14 AWS resources destroyed via `terraform destroy` (2026).
+- No ongoing AWS costs from this project.
+- Full code preserved in GitHub: github.com/merterakinci/ecommerce-infra-as-code
+- Can be fully recreated at any time via `terraform apply` (takes ~5-10 minutes,
+  RDS being the slowest resource to provision).
+- Learning continues in a separate repository: k8s-labs (Kubernetes / Minikube,
+  targeting CKA/CKS certification path).
