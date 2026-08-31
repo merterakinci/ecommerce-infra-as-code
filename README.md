@@ -27,3 +27,9 @@ terraform apply
 - [ ] RDS database
 - [ ] Application deployment via ECS/Kubernetes
 - [ ] Security scanning (Checkov/tfsec) in CI/CD
+
+## Status: Completed (Phase 1-3)
+All AWS resources have been destroyed to avoid ongoing costs.
+See [final project summary](./docs/ecommerce-infra-as-code_final_summary.pdf) for full details.
+
+Kubernetes learning continues in a separate repository: [k8s-labs](https://github.com/merterakinci/k8s-labs)
